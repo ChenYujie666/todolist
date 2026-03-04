@@ -2,6 +2,8 @@ import json
 import os
 import sys
 import importlib.util
+import ctypes
+import tempfile
 from dataclasses import dataclass, asdict
 
 def _prepare_pyqt6_dll_path() -> None:
@@ -26,14 +28,18 @@ def _prepare_pyqt6_dll_path() -> None:
 _prepare_pyqt6_dll_path()
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -41,6 +47,8 @@ from PyQt6.QtWidgets import (
 
 
 DATA_FILE = "todos.json"
+APP_DIR_NAME = "TodoList"
+HIDDEN_DATA_FILE = ".todos.json"
 
 
 @dataclass
@@ -53,6 +61,7 @@ class TodoApp(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.todos: list[TodoItem] = []
+        self._data_path: str | None = None
 
         self.setWindowTitle("Todo List")
         self.setMinimumWidth(380)
@@ -77,9 +86,28 @@ class TodoApp(QWidget):
         self.pin_checkbox = QCheckBox("窗口置顶")
         self.pin_checkbox.stateChanged.connect(self.toggle_topmost)
 
+        self.path_button = QPushButton("数据路径")
+        self.path_button.clicked.connect(self.show_data_path)
+
+        self.menu_button = QPushButton("菜单")
+        self.menu = QMenu(self)
+        self.json_menu = self.menu.addMenu("JSON")
+
+        self.save_json_action = QAction("Save JSON", self)
+        self.save_json_action.triggered.connect(self.export_json_file)
+        self.json_menu.addAction(self.save_json_action)
+
+        self.load_json_action = QAction("Load JSON", self)
+        self.load_json_action.triggered.connect(self.import_json_file)
+        self.json_menu.addAction(self.load_json_action)
+
+        self.menu_button.setMenu(self.menu)
+
         footer_layout = QHBoxLayout()
         footer_layout.addWidget(self.pin_checkbox)
         footer_layout.addStretch()
+        footer_layout.addWidget(self.menu_button)
+        footer_layout.addWidget(self.path_button)
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.title_label)
@@ -128,6 +156,54 @@ class TodoApp(QWidget):
         self.load_todos()
 
     def get_data_path(self) -> str:
+        if self._data_path:
+            return self._data_path
+
+        candidates: list[str] = []
+        if os.name == "nt":
+            local_app_data = os.getenv("LOCALAPPDATA")
+            roaming_app_data = os.getenv("APPDATA")
+            if local_app_data:
+                candidates.append(os.path.join(local_app_data, APP_DIR_NAME))
+            if roaming_app_data:
+                candidates.append(os.path.join(roaming_app_data, APP_DIR_NAME))
+            candidates.append(os.path.join(os.path.expanduser("~"), APP_DIR_NAME))
+            candidates.append(os.path.join(tempfile.gettempdir(), APP_DIR_NAME))
+        else:
+            candidates.append(os.path.join(os.path.expanduser("~"), f".{APP_DIR_NAME.lower()}"))
+            candidates.append(os.path.join(tempfile.gettempdir(), APP_DIR_NAME.lower()))
+
+        for app_dir in candidates:
+            try:
+                os.makedirs(app_dir, exist_ok=True)
+                probe_file = os.path.join(app_dir, ".write_test")
+                with open(probe_file, "w", encoding="utf-8") as file:
+                    file.write("ok")
+                os.remove(probe_file)
+                self._mark_hidden(app_dir)
+                self._data_path = os.path.join(app_dir, HIDDEN_DATA_FILE)
+                return self._data_path
+            except OSError:
+                continue
+
+        fallback = os.path.join(tempfile.gettempdir(), HIDDEN_DATA_FILE)
+        self._data_path = fallback
+        return self._data_path
+
+    def _mark_hidden(self, path: str) -> None:
+        if os.name != "nt":
+            return
+
+        try:
+            FILE_ATTRIBUTE_HIDDEN = 0x02
+            current = ctypes.windll.kernel32.GetFileAttributesW(path)
+            if current == -1:
+                return
+            ctypes.windll.kernel32.SetFileAttributesW(path, current | FILE_ATTRIBUTE_HIDDEN)
+        except Exception:
+            return
+
+    def _get_legacy_data_path(self) -> str:
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), DATA_FILE)
 
     def add_todo(self) -> None:
@@ -179,12 +255,34 @@ class TodoApp(QWidget):
 
     def save_todos(self) -> None:
         data = [asdict(todo) for todo in self.todos]
-        with open(self.get_data_path(), "w", encoding="utf-8") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
+        data_path = self.get_data_path()
+        try:
+            with open(data_path, "w", encoding="utf-8") as file:
+                json.dump(data, file, ensure_ascii=False, indent=2)
+            self._mark_hidden(data_path)
+        except OSError:
+            self._data_path = None
+            retry_path = self.get_data_path()
+            try:
+                with open(retry_path, "w", encoding="utf-8") as file:
+                    json.dump(data, file, ensure_ascii=False, indent=2)
+                self._mark_hidden(retry_path)
+            except OSError:
+                return
 
     def load_todos(self) -> None:
         path = self.get_data_path()
         if not os.path.exists(path):
+            legacy_path = self._get_legacy_data_path()
+            if os.path.exists(legacy_path):
+                try:
+                    with open(legacy_path, "r", encoding="utf-8") as file:
+                        data = json.load(file)
+                    self.todos = [TodoItem(text=item.get("text", ""), done=item.get("done", False)) for item in data]
+                    self.save_todos()
+                except (json.JSONDecodeError, OSError):
+                    self.todos = []
+                self.refresh_list()
             return
 
         try:
@@ -199,6 +297,76 @@ class TodoApp(QWidget):
         is_topmost = state == Qt.CheckState.Checked.value
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, is_topmost)
         self.show()
+
+    def export_json_file(self) -> None:
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save JSON",
+            "todos.json",
+            "JSON Files (*.json)",
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".json"):
+            file_path += ".json"
+
+        data = [asdict(todo) for todo in self.todos]
+        try:
+            with open(file_path, "w", encoding="utf-8") as file:
+                json.dump(data, file, ensure_ascii=False, indent=2)
+            QMessageBox.information(self, "Save JSON", "保存成功")
+        except OSError:
+            QMessageBox.warning(self, "Save JSON", "保存失败")
+
+    def import_json_file(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load JSON",
+            "",
+            "JSON Files (*.json)",
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+        except (json.JSONDecodeError, OSError):
+            QMessageBox.warning(self, "Load JSON", "读取失败，文件格式不正确")
+            return
+
+        if not isinstance(data, list):
+            QMessageBox.warning(self, "Load JSON", "读取失败，JSON 必须是数组")
+            return
+
+        todos: list[TodoItem] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            done = bool(item.get("done", False))
+            todos.append(TodoItem(text=text, done=done))
+
+        self.todos = todos
+        self.refresh_list()
+        self.save_todos()
+        QMessageBox.information(self, "Load JSON", "加载成功")
+
+    def show_data_path(self) -> None:
+        data_path = self.get_data_path()
+        message_box = QMessageBox(self)
+        message_box.setWindowTitle("数据文件位置")
+        message_box.setText(data_path)
+
+        copy_button = message_box.addButton("复制路径", QMessageBox.ButtonRole.ActionRole)
+        message_box.addButton("关闭", QMessageBox.ButtonRole.AcceptRole)
+        message_box.exec()
+
+        if message_box.clickedButton() == copy_button:
+            QApplication.clipboard().setText(data_path)
 
 
 if __name__ == "__main__":
