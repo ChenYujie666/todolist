@@ -62,8 +62,10 @@ MAX_YEARLY_BACKUPS = 10
 STATUS_IN_PROGRESS = "正在进行"
 STATUS_LATER = "稍后进行"
 STATUS_DONE = "已完成"
+STATUS_DELETED = "已删除"
 STATUS_ALL = "全部"
 STATUS_OPTIONS = [STATUS_IN_PROGRESS, STATUS_LATER, STATUS_DONE]
+STATUS_FILTER_OPTIONS = [STATUS_IN_PROGRESS, STATUS_LATER, STATUS_DONE, STATUS_DELETED]
 
 
 @dataclass
@@ -114,6 +116,8 @@ class TodoApp(QWidget):
 
         self.todo_list = QListWidget()
         self.todo_list.itemDoubleClicked.connect(self.edit_todo_item)
+        self.todo_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.todo_list.customContextMenuRequested.connect(self.open_todo_context_menu)
 
         self.pin_button = QPushButton("↑")
         self.pin_button.setObjectName("topmostButton")
@@ -121,9 +125,6 @@ class TodoApp(QWidget):
         self.pin_button.setChecked(True)
         self.pin_button.setToolTip("切换窗口是否置顶")
         self.pin_button.clicked.connect(self.toggle_topmost)
-
-        top_bar_layout.addStretch()
-        top_bar_layout.addWidget(self.pin_button)
 
         self.menu_button = QPushButton("菜单")
         self.menu = QMenu(self)
@@ -179,19 +180,22 @@ class TodoApp(QWidget):
         self.filter_done_action.triggered.connect(lambda: self.set_status_filter(STATUS_DONE))
         self.filter_menu.addAction(self.filter_done_action)
 
+        self.filter_deleted_action = QAction(STATUS_DELETED, self)
+        self.filter_deleted_action.triggered.connect(lambda: self.set_status_filter(STATUS_DELETED))
+        self.filter_menu.addAction(self.filter_deleted_action)
+
         self.menu_button.setMenu(self.menu)
 
-        footer_layout = QHBoxLayout()
-        footer_layout.addStretch()
-        footer_layout.addWidget(self.menu_button)
+        top_bar_layout.addWidget(self.title_label)
+        top_bar_layout.addStretch()
+        top_bar_layout.addWidget(self.menu_button)
+        top_bar_layout.addWidget(self.pin_button)
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.top_bar)
-        main_layout.addWidget(self.title_label)
         main_layout.addWidget(self.stats_label)
         main_layout.addLayout(input_layout)
         main_layout.addWidget(self.todo_list)
-        main_layout.addLayout(footer_layout)
         main_layout.addWidget(self.save_status_label)
         self.setLayout(main_layout)
 
@@ -348,6 +352,7 @@ class TodoApp(QWidget):
             STATUS_IN_PROGRESS: [],
             STATUS_LATER: [],
             STATUS_DONE: [],
+            STATUS_DELETED: [],
         }
 
         for index, todo in indexed_todos:
@@ -355,7 +360,7 @@ class TodoApp(QWidget):
                 continue
             grouped[todo.status].append((index, todo))
 
-        for status in STATUS_OPTIONS:
+        for status in STATUS_FILTER_OPTIONS:
             todos_in_group = grouped[status]
             if not todos_in_group:
                 continue
@@ -372,6 +377,7 @@ class TodoApp(QWidget):
 
                 done_checkbox = QCheckBox()
                 done_checkbox.setChecked(todo.done)
+                done_checkbox.setEnabled(todo.status != STATUS_DELETED)
                 checked_text = todo.checked_at if todo.checked_at else "未完成"
                 todo_tooltip = (
                     "待办详情\n"
@@ -389,7 +395,11 @@ class TodoApp(QWidget):
 
                 status_combo = QComboBox()
                 status_combo.addItems(STATUS_OPTIONS)
-                status_combo.setCurrentText(todo.status)
+                if todo.status in STATUS_OPTIONS:
+                    status_combo.setCurrentText(todo.status)
+                else:
+                    status_combo.setCurrentText(STATUS_IN_PROGRESS)
+                status_combo.setEnabled(todo.status != STATUS_DELETED)
                 status_combo.currentTextChanged.connect(lambda value, i=index: self.change_status(i, value))
                 status_combo.setFixedWidth(100)
 
@@ -405,14 +415,9 @@ class TodoApp(QWidget):
                 title_layout.addStretch()
                 left_layout.addLayout(title_layout)
 
-                delete_button = QPushButton("删除")
-                delete_button.setFixedWidth(58)
-                delete_button.clicked.connect(lambda _, i=index: self.delete_todo(i))
-
                 row_layout.addWidget(left_widget)
                 row_layout.addStretch()
                 row_layout.addWidget(status_combo)
-                row_layout.addWidget(delete_button)
 
                 item = QListWidgetItem(self.todo_list)
                 item.setData(Qt.ItemDataRole.UserRole, index)
@@ -424,8 +429,9 @@ class TodoApp(QWidget):
         in_progress_count = sum(1 for todo in self.todos if todo.status == STATUS_IN_PROGRESS)
         later_count = sum(1 for todo in self.todos if todo.status == STATUS_LATER)
         done_count = sum(1 for todo in self.todos if todo.status == STATUS_DONE)
+        deleted_count = sum(1 for todo in self.todos if todo.status == STATUS_DELETED)
         self.stats_label.setText(
-            f"统计：正在进行 {in_progress_count}  |  稍后进行 {later_count}  |  已完成 {done_count}"
+            f"统计：正在进行 {in_progress_count}  |  稍后进行 {later_count}  |  已完成 {done_count}  |  已删除 {deleted_count}"
         )
 
     def toggle_done(self, index: int, done: bool) -> None:
@@ -454,6 +460,47 @@ class TodoApp(QWidget):
             self.refresh_list()
             self.save_todos()
 
+    def open_todo_context_menu(self, position) -> None:
+        item = self.todo_list.itemAt(position)
+        if item is None:
+            return
+
+        index = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(index, int):
+            return
+        if not (0 <= index < len(self.todos)):
+            return
+
+        menu = QMenu(self)
+        todo = self.todos[index]
+
+        if todo.status == STATUS_DELETED:
+            menu.setStyleSheet(
+                """
+                QMenu::item:selected {
+                    background-color: #16a34a;
+                    color: white;
+                }
+                """
+            )
+            restore_action = QAction("恢复到正在进行", self)
+            restore_action.triggered.connect(lambda: self.restore_todo(index))
+            menu.addAction(restore_action)
+        else:
+            menu.setStyleSheet(
+                """
+                QMenu::item:selected {
+                    background-color: #dc2626;
+                    color: white;
+                }
+                """
+            )
+            delete_action = QAction("移到已删除", self)
+            delete_action.triggered.connect(lambda: self.delete_todo(index))
+            menu.addAction(delete_action)
+
+        menu.exec(self.todo_list.viewport().mapToGlobal(position))
+
     def set_sort_mode(self, mode: str) -> None:
         self.current_sort_mode = mode
         self.refresh_list()
@@ -473,7 +520,17 @@ class TodoApp(QWidget):
 
     def delete_todo(self, index: int) -> None:
         if 0 <= index < len(self.todos):
-            del self.todos[index]
+            self.todos[index].status = STATUS_DELETED
+            self.todos[index].done = False
+            self.todos[index].checked_at = None
+            self.refresh_list()
+            self.save_todos()
+
+    def restore_todo(self, index: int) -> None:
+        if 0 <= index < len(self.todos) and self.todos[index].status == STATUS_DELETED:
+            self.todos[index].status = STATUS_IN_PROGRESS
+            self.todos[index].done = False
+            self.todos[index].checked_at = None
             self.refresh_list()
             self.save_todos()
 
@@ -631,7 +688,7 @@ class TodoApp(QWidget):
                             created_at=item.get("created_at") or self._now_text(),
                             checked_at=item.get("checked_at"),
                             status=item.get("status")
-                            if item.get("status") in STATUS_OPTIONS
+                            if item.get("status") in STATUS_FILTER_OPTIONS
                             else (STATUS_DONE if item.get("done", False) else STATUS_IN_PROGRESS),
                         )
                         for item in data
@@ -656,7 +713,7 @@ class TodoApp(QWidget):
                     created_at=item.get("created_at") or self._now_text(),
                     checked_at=item.get("checked_at"),
                     status=item.get("status")
-                    if item.get("status") in STATUS_OPTIONS
+                    if item.get("status") in STATUS_FILTER_OPTIONS
                     else (STATUS_DONE if item.get("done", False) else STATUS_IN_PROGRESS),
                 )
                 for item in data
@@ -749,7 +806,7 @@ class TodoApp(QWidget):
             done = bool(item.get("done", False))
             created_at = item.get("created_at") or self._now_text()
             checked_at = item.get("checked_at")
-            status = item.get("status") if item.get("status") in STATUS_OPTIONS else None
+            status = item.get("status") if item.get("status") in STATUS_FILTER_OPTIONS else None
             if not status:
                 status = STATUS_DONE if done else STATUS_IN_PROGRESS
             if done and not checked_at:
@@ -760,6 +817,9 @@ class TodoApp(QWidget):
                 done = True
                 if not checked_at:
                     checked_at = self._now_text()
+            elif status == STATUS_DELETED:
+                done = False
+                checked_at = None
             else:
                 done = False
                 checked_at = None
@@ -810,13 +870,16 @@ class TodoApp(QWidget):
             done = bool(item.get("done", False))
             created_at = item.get("created_at") or self._now_text()
             checked_at = item.get("checked_at")
-            status = item.get("status") if item.get("status") in STATUS_OPTIONS else None
+            status = item.get("status") if item.get("status") in STATUS_FILTER_OPTIONS else None
             if not status:
                 status = STATUS_DONE if done else STATUS_IN_PROGRESS
             if status == STATUS_DONE:
                 done = True
                 if not checked_at:
                     checked_at = self._now_text()
+            elif status == STATUS_DELETED:
+                done = False
+                checked_at = None
             else:
                 done = False
                 checked_at = None
