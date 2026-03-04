@@ -110,8 +110,12 @@ class TodoApp(QWidget):
         self.todo_list = QListWidget()
         self.todo_list.itemDoubleClicked.connect(self.edit_todo_item)
 
-        self.pin_checkbox = QCheckBox("窗口置顶")
-        self.pin_checkbox.stateChanged.connect(self.toggle_topmost)
+        self.pin_button = QPushButton("↑ 置顶")
+        self.pin_button.setObjectName("topmostButton")
+        self.pin_button.setCheckable(True)
+        self.pin_button.setChecked(True)
+        self.pin_button.setToolTip("切换窗口是否置顶")
+        self.pin_button.clicked.connect(self.toggle_topmost)
 
         self.menu_button = QPushButton("菜单")
         self.menu = QMenu(self)
@@ -170,7 +174,7 @@ class TodoApp(QWidget):
         self.menu_button.setMenu(self.menu)
 
         footer_layout = QHBoxLayout()
-        footer_layout.addWidget(self.pin_checkbox)
+        footer_layout.addWidget(self.pin_button)
         footer_layout.addStretch()
         footer_layout.addWidget(self.menu_button)
 
@@ -211,6 +215,20 @@ class TodoApp(QWidget):
             QPushButton:hover {
                 background: #1d4ed8;
             }
+            #topmostButton {
+                background: #dbeafe;
+                color: #1d4ed8;
+                border: 1px solid #93c5fd;
+                font-weight: 700;
+            }
+            #topmostButton:hover {
+                background: #bfdbfe;
+            }
+            #topmostButton:checked {
+                background: #1d4ed8;
+                color: white;
+                border: 1px solid #1d4ed8;
+            }
             QListWidget {
                 border: 1px solid #e5e7eb;
                 border-radius: 10px;
@@ -221,6 +239,7 @@ class TodoApp(QWidget):
         )
 
         self.load_todos()
+        self.toggle_topmost(True)
 
     def get_data_path(self) -> str:
         if self._data_path:
@@ -656,10 +675,13 @@ class TodoApp(QWidget):
             except (json.JSONDecodeError, OSError):
                 continue
 
-    def toggle_topmost(self, state: int) -> None:
-        is_topmost = state == Qt.CheckState.Checked.value
+    def toggle_topmost(self, checked: bool) -> None:
+        is_topmost = bool(checked)
+        self.pin_button.setText("↑ 置顶中" if is_topmost else "↑ 置顶")
+        was_visible = self.isVisible()
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, is_topmost)
-        self.show()
+        if was_visible:
+            self.show()
 
     def export_json_file(self) -> None:
         file_path, _ = QFileDialog.getSaveFileName(
