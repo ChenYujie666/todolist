@@ -84,6 +84,8 @@ class TodoApp(QWidget):
         self._data_path: str | None = None
         self.current_status_filter = STATUS_ALL
         self.current_sort_mode = "created_desc"
+        self.collapsed_statuses: set[str] = set()
+        self.hidden_statuses: set[str] = {STATUS_DELETED}
 
         self.setWindowTitle("Todo List")
         self.setMinimumWidth(380)
@@ -116,6 +118,7 @@ class TodoApp(QWidget):
 
         self.todo_list = QListWidget()
         self.todo_list.itemDoubleClicked.connect(self.edit_todo_item)
+        self.todo_list.itemClicked.connect(self.handle_list_item_clicked)
         self.todo_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.todo_list.customContextMenuRequested.connect(self.open_todo_context_menu)
 
@@ -131,6 +134,7 @@ class TodoApp(QWidget):
         self.json_menu = self.menu.addMenu("JSON")
         self.sort_menu = self.menu.addMenu("排序")
         self.filter_menu = self.menu.addMenu("按状态分类")
+        self.hide_status_menu = self.menu.addMenu("隐藏状态")
 
         self.save_json_action = QAction("Save JSON", self)
         self.save_json_action.triggered.connect(self.export_json_file)
@@ -183,6 +187,15 @@ class TodoApp(QWidget):
         self.filter_deleted_action = QAction(STATUS_DELETED, self)
         self.filter_deleted_action.triggered.connect(lambda: self.set_status_filter(STATUS_DELETED))
         self.filter_menu.addAction(self.filter_deleted_action)
+
+        self.hide_status_actions: dict[str, QAction] = {}
+        for status in STATUS_FILTER_OPTIONS:
+            action = QAction(status, self)
+            action.setCheckable(True)
+            action.setChecked(status in self.hidden_statuses)
+            action.toggled.connect(lambda checked, s=status: self.toggle_hidden_status(s, checked))
+            self.hide_status_menu.addAction(action)
+            self.hide_status_actions[status] = action
 
         self.menu_button.setMenu(self.menu)
 
@@ -361,14 +374,23 @@ class TodoApp(QWidget):
             grouped[todo.status].append((index, todo))
 
         for status in STATUS_FILTER_OPTIONS:
+            if status in self.hidden_statuses:
+                continue
+
             todos_in_group = grouped[status]
             if not todos_in_group:
                 continue
 
-            header_item = QListWidgetItem(f"{status}（{len(todos_in_group)}）")
-            header_item.setFlags(Qt.ItemFlag.NoItemFlags)
+            collapsed = status in self.collapsed_statuses
+            marker = "▸" if collapsed else "▾"
+            header_item = QListWidgetItem(f"{marker} {status}（{len(todos_in_group)}）")
+            header_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            header_item.setData(Qt.ItemDataRole.UserRole + 1, status)
             header_item.setTextAlignment(Qt.AlignmentFlag.AlignLeft)
             self.todo_list.addItem(header_item)
+
+            if collapsed:
+                continue
 
             for index, todo in todos_in_group:
                 row_widget = QWidget()
@@ -507,6 +529,24 @@ class TodoApp(QWidget):
 
     def set_status_filter(self, status_filter: str) -> None:
         self.current_status_filter = status_filter
+        self.refresh_list()
+
+    def toggle_hidden_status(self, status: str, hidden: bool) -> None:
+        if hidden:
+            self.hidden_statuses.add(status)
+        else:
+            self.hidden_statuses.discard(status)
+        self.refresh_list()
+
+    def handle_list_item_clicked(self, item: QListWidgetItem) -> None:
+        status = item.data(Qt.ItemDataRole.UserRole + 1)
+        if not isinstance(status, str):
+            return
+
+        if status in self.collapsed_statuses:
+            self.collapsed_statuses.remove(status)
+        else:
+            self.collapsed_statuses.add(status)
         self.refresh_list()
 
     def _sort_todos(self, indexed_todos: list[tuple[int, TodoItem]]) -> list[tuple[int, TodoItem]]:
