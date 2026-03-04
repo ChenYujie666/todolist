@@ -90,6 +90,11 @@ class TodoApp(QWidget):
         self.title_label = QLabel("我的待办")
         self.title_label.setObjectName("titleLabel")
 
+        self.top_bar = QWidget()
+        top_bar_layout = QHBoxLayout(self.top_bar)
+        top_bar_layout.setContentsMargins(0, 0, 0, 0)
+        top_bar_layout.setSpacing(6)
+
         self.stats_label = QLabel("")
         self.stats_label.setStyleSheet("color: #374151; font-size: 12px;")
 
@@ -110,12 +115,15 @@ class TodoApp(QWidget):
         self.todo_list = QListWidget()
         self.todo_list.itemDoubleClicked.connect(self.edit_todo_item)
 
-        self.pin_button = QPushButton("↑ 置顶")
+        self.pin_button = QPushButton("↑")
         self.pin_button.setObjectName("topmostButton")
         self.pin_button.setCheckable(True)
         self.pin_button.setChecked(True)
         self.pin_button.setToolTip("切换窗口是否置顶")
         self.pin_button.clicked.connect(self.toggle_topmost)
+
+        top_bar_layout.addStretch()
+        top_bar_layout.addWidget(self.pin_button)
 
         self.menu_button = QPushButton("菜单")
         self.menu = QMenu(self)
@@ -174,11 +182,11 @@ class TodoApp(QWidget):
         self.menu_button.setMenu(self.menu)
 
         footer_layout = QHBoxLayout()
-        footer_layout.addWidget(self.pin_button)
         footer_layout.addStretch()
         footer_layout.addWidget(self.menu_button)
 
         main_layout = QVBoxLayout()
+        main_layout.addWidget(self.top_bar)
         main_layout.addWidget(self.title_label)
         main_layout.addWidget(self.stats_label)
         main_layout.addLayout(input_layout)
@@ -216,16 +224,22 @@ class TodoApp(QWidget):
                 background: #1d4ed8;
             }
             #topmostButton {
-                background: #dbeafe;
-                color: #1d4ed8;
-                border: 1px solid #93c5fd;
+                min-width: 28px;
+                max-width: 28px;
+                min-height: 28px;
+                max-height: 28px;
+                padding: 0;
+                border-radius: 6px;
+                background: #f3f4f6;
+                color: #111827;
+                border: 1px solid #d1d5db;
                 font-weight: 700;
             }
             #topmostButton:hover {
-                background: #bfdbfe;
+                background: #e5e7eb;
             }
             #topmostButton:checked {
-                background: #1d4ed8;
+                background: #2563eb;
                 color: white;
                 border: 1px solid #1d4ed8;
             }
@@ -677,7 +691,7 @@ class TodoApp(QWidget):
 
     def toggle_topmost(self, checked: bool) -> None:
         is_topmost = bool(checked)
-        self.pin_button.setText("↑ 置顶中" if is_topmost else "↑ 置顶")
+        self.pin_button.setToolTip("已置顶" if is_topmost else "未置顶")
         was_visible = self.isVisible()
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, is_topmost)
         if was_visible:
