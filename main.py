@@ -4,6 +4,7 @@ import sys
 import importlib.util
 import ctypes
 import tempfile
+from datetime import datetime
 from dataclasses import dataclass, asdict
 
 def _prepare_pyqt6_dll_path() -> None:
@@ -55,6 +56,8 @@ HIDDEN_DATA_FILE = ".todos.json"
 class TodoItem:
     text: str
     done: bool = False
+    created_at: str = ""
+    checked_at: str | None = None
 
 
 class TodoApp(QWidget):
@@ -211,10 +214,13 @@ class TodoApp(QWidget):
         if not text:
             return
 
-        self.todos.append(TodoItem(text=text, done=False))
+        self.todos.append(TodoItem(text=text, done=False, created_at=self._now_text(), checked_at=None))
         self.input_box.clear()
         self.refresh_list()
         self.save_todos()
+
+    def _now_text(self) -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def refresh_list(self) -> None:
         self.todo_list.clear()
@@ -225,15 +231,27 @@ class TodoApp(QWidget):
 
             done_checkbox = QCheckBox(todo.text)
             done_checkbox.setChecked(todo.done)
+            checked_text = todo.checked_at if todo.checked_at else "未完成"
+            done_checkbox.setToolTip(f"创建时间: {todo.created_at}\n勾选时间: {checked_text}")
             done_checkbox.stateChanged.connect(
                 lambda state, i=index: self.toggle_done(i, state == Qt.CheckState.Checked.value)
             )
+
+            time_label = QLabel(f"创建: {todo.created_at}    勾选: {checked_text}")
+            time_label.setStyleSheet("color: #6b7280; font-size: 12px;")
+
+            left_widget = QWidget()
+            left_layout = QVBoxLayout(left_widget)
+            left_layout.setContentsMargins(0, 0, 0, 0)
+            left_layout.setSpacing(2)
+            left_layout.addWidget(done_checkbox)
+            left_layout.addWidget(time_label)
 
             delete_button = QPushButton("删除")
             delete_button.setFixedWidth(58)
             delete_button.clicked.connect(lambda _, i=index: self.delete_todo(i))
 
-            row_layout.addWidget(done_checkbox)
+            row_layout.addWidget(left_widget)
             row_layout.addStretch()
             row_layout.addWidget(delete_button)
 
@@ -245,6 +263,8 @@ class TodoApp(QWidget):
     def toggle_done(self, index: int, done: bool) -> None:
         if 0 <= index < len(self.todos):
             self.todos[index].done = done
+            self.todos[index].checked_at = self._now_text() if done else None
+            self.refresh_list()
             self.save_todos()
 
     def delete_todo(self, index: int) -> None:
@@ -278,7 +298,15 @@ class TodoApp(QWidget):
                 try:
                     with open(legacy_path, "r", encoding="utf-8") as file:
                         data = json.load(file)
-                    self.todos = [TodoItem(text=item.get("text", ""), done=item.get("done", False)) for item in data]
+                    self.todos = [
+                        TodoItem(
+                            text=item.get("text", ""),
+                            done=item.get("done", False),
+                            created_at=item.get("created_at") or self._now_text(),
+                            checked_at=item.get("checked_at"),
+                        )
+                        for item in data
+                    ]
                     self.save_todos()
                 except (json.JSONDecodeError, OSError):
                     self.todos = []
@@ -288,7 +316,15 @@ class TodoApp(QWidget):
         try:
             with open(path, "r", encoding="utf-8") as file:
                 data = json.load(file)
-            self.todos = [TodoItem(text=item.get("text", ""), done=item.get("done", False)) for item in data]
+            self.todos = [
+                TodoItem(
+                    text=item.get("text", ""),
+                    done=item.get("done", False),
+                    created_at=item.get("created_at") or self._now_text(),
+                    checked_at=item.get("checked_at"),
+                )
+                for item in data
+            ]
             self.refresh_list()
         except (json.JSONDecodeError, OSError):
             self.todos = []
@@ -348,7 +384,13 @@ class TodoApp(QWidget):
             if not text:
                 continue
             done = bool(item.get("done", False))
-            todos.append(TodoItem(text=text, done=done))
+            created_at = item.get("created_at") or self._now_text()
+            checked_at = item.get("checked_at")
+            if done and not checked_at:
+                checked_at = self._now_text()
+            if not done:
+                checked_at = None
+            todos.append(TodoItem(text=text, done=done, created_at=created_at, checked_at=checked_at))
 
         self.todos = todos
         self.refresh_list()
