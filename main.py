@@ -4,6 +4,7 @@ import sys
 import importlib.util
 import ctypes
 import tempfile
+import shutil
 from datetime import datetime
 from dataclasses import dataclass, asdict
 
@@ -52,6 +53,8 @@ from PyQt6.QtWidgets import (
 DATA_FILE = "todos.json"
 APP_DIR_NAME = "TodoList"
 HIDDEN_DATA_FILE = ".todos.json"
+BACKUP_DIR_NAME = "backups"
+MAX_BACKUP_FILES = 20
 STATUS_IN_PROGRESS = "正在进行"
 STATUS_LATER = "稍后进行"
 STATUS_DONE = "已完成"
@@ -106,9 +109,6 @@ class TodoApp(QWidget):
         self.pin_checkbox = QCheckBox("窗口置顶")
         self.pin_checkbox.stateChanged.connect(self.toggle_topmost)
 
-        self.path_button = QPushButton("数据路径")
-        self.path_button.clicked.connect(self.show_data_path)
-
         self.menu_button = QPushButton("菜单")
         self.menu = QMenu(self)
         self.json_menu = self.menu.addMenu("JSON")
@@ -122,6 +122,14 @@ class TodoApp(QWidget):
         self.load_json_action = QAction("Load JSON", self)
         self.load_json_action.triggered.connect(self.import_json_file)
         self.json_menu.addAction(self.load_json_action)
+
+        self.restore_backup_action = QAction("恢复最近一次备份", self)
+        self.restore_backup_action.triggered.connect(self.restore_latest_backup)
+        self.json_menu.addAction(self.restore_backup_action)
+
+        self.show_data_path_action = QAction("数据路径", self)
+        self.show_data_path_action.triggered.connect(self.show_data_path)
+        self.json_menu.addAction(self.show_data_path_action)
 
         self.sort_created_desc_action = QAction("创建时间（新->旧）", self)
         self.sort_created_desc_action.triggered.connect(lambda: self.set_sort_mode("created_desc"))
@@ -161,7 +169,6 @@ class TodoApp(QWidget):
         footer_layout.addWidget(self.pin_checkbox)
         footer_layout.addStretch()
         footer_layout.addWidget(self.menu_button)
-        footer_layout.addWidget(self.path_button)
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(self.title_label)
@@ -458,6 +465,7 @@ class TodoApp(QWidget):
         data_path = self.get_data_path()
         try:
             os.makedirs(os.path.dirname(data_path), exist_ok=True)
+            self._backup_current_data_file(data_path)
             temp_path = f"{data_path}.tmp"
             with open(temp_path, "w", encoding="utf-8") as file:
                 json.dump(data, file, ensure_ascii=False, indent=2)
@@ -471,6 +479,7 @@ class TodoApp(QWidget):
             retry_path = self.get_data_path()
             try:
                 os.makedirs(os.path.dirname(retry_path), exist_ok=True)
+                self._backup_current_data_file(retry_path)
                 retry_temp_path = f"{retry_path}.tmp"
                 with open(retry_temp_path, "w", encoding="utf-8") as file:
                     json.dump(data, file, ensure_ascii=False, indent=2)
@@ -482,6 +491,38 @@ class TodoApp(QWidget):
             except OSError:
                 self.show_save_status("自动保存失败", False)
                 return
+
+    def _backup_current_data_file(self, data_path: str) -> None:
+        if not os.path.exists(data_path):
+            return
+
+        backup_dir = os.path.join(os.path.dirname(data_path), BACKUP_DIR_NAME)
+        try:
+            os.makedirs(backup_dir, exist_ok=True)
+            self._mark_hidden(backup_dir)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            backup_path = os.path.join(backup_dir, f"todos_{timestamp}.json")
+            shutil.copy2(data_path, backup_path)
+            self._mark_hidden(backup_path)
+            self._cleanup_old_backups(backup_dir)
+        except OSError:
+            return
+
+    def _cleanup_old_backups(self, backup_dir: str) -> None:
+        try:
+            backup_files = [
+                os.path.join(backup_dir, name)
+                for name in os.listdir(backup_dir)
+                if name.lower().endswith(".json")
+            ]
+            backup_files.sort(key=os.path.getmtime, reverse=True)
+            for old_file in backup_files[MAX_BACKUP_FILES:]:
+                try:
+                    os.remove(old_file)
+                except OSError:
+                    continue
+        except OSError:
+            return
 
     def show_save_status(self, text: str, success: bool) -> None:
         color = "#059669" if success else "#dc2626"
@@ -644,6 +685,64 @@ class TodoApp(QWidget):
         self.refresh_list()
         self.save_todos()
         QMessageBox.information(self, "Load JSON", "加载成功")
+
+    def restore_latest_backup(self) -> None:
+        data_path = self.get_data_path()
+        backup_dir = os.path.join(os.path.dirname(data_path), BACKUP_DIR_NAME)
+
+        if not os.path.isdir(backup_dir):
+            QMessageBox.warning(self, "恢复备份", "未找到备份目录")
+            return
+
+        backup_files = [
+            os.path.join(backup_dir, name)
+            for name in os.listdir(backup_dir)
+            if name.lower().endswith(".json")
+        ]
+        if not backup_files:
+            QMessageBox.warning(self, "恢复备份", "没有可恢复的备份")
+            return
+
+        backup_files.sort(key=os.path.getmtime, reverse=True)
+        latest_backup = backup_files[0]
+
+        try:
+            with open(latest_backup, "r", encoding="utf-8") as file:
+                data = json.load(file)
+            if not isinstance(data, list):
+                raise ValueError("invalid backup format")
+        except (json.JSONDecodeError, OSError, ValueError):
+            QMessageBox.warning(self, "恢复备份", "备份文件损坏，恢复失败")
+            return
+
+        todos: list[TodoItem] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+
+            done = bool(item.get("done", False))
+            created_at = item.get("created_at") or self._now_text()
+            checked_at = item.get("checked_at")
+            status = item.get("status") if item.get("status") in STATUS_OPTIONS else None
+            if not status:
+                status = STATUS_DONE if done else STATUS_IN_PROGRESS
+            if status == STATUS_DONE:
+                done = True
+                if not checked_at:
+                    checked_at = self._now_text()
+            else:
+                done = False
+                checked_at = None
+
+            todos.append(TodoItem(text=text, done=done, created_at=created_at, checked_at=checked_at, status=status))
+
+        self.todos = todos
+        self.refresh_list()
+        self.save_todos()
+        QMessageBox.information(self, "恢复备份", "已恢复最近一次备份")
 
     def show_data_path(self) -> None:
         data_path = self.get_data_path()
