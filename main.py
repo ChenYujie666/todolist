@@ -55,6 +55,10 @@ APP_DIR_NAME = "TodoList"
 HIDDEN_DATA_FILE = ".todos.json"
 BACKUP_DIR_NAME = "backups"
 MAX_BACKUP_FILES = 20
+MAX_DAILY_BACKUPS = 30
+MAX_WEEKLY_BACKUPS = 26
+MAX_MONTHLY_BACKUPS = 24
+MAX_YEARLY_BACKUPS = 10
 STATUS_IN_PROGRESS = "正在进行"
 STATUS_LATER = "稍后进行"
 STATUS_DONE = "已完成"
@@ -505,6 +509,7 @@ class TodoApp(QWidget):
             shutil.copy2(data_path, backup_path)
             self._mark_hidden(backup_path)
             self._cleanup_old_backups(backup_dir)
+            self._create_periodic_backups(data_path, backup_dir)
         except OSError:
             return
 
@@ -524,10 +529,53 @@ class TodoApp(QWidget):
         except OSError:
             return
 
+    def _create_periodic_backups(self, data_path: str, backup_dir: str) -> None:
+        now = datetime.now()
+        iso_year, iso_week, _ = now.isocalendar()
+
+        periodic_specs = [
+            ("daily", f"daily_{now.strftime('%Y%m%d')}.json", MAX_DAILY_BACKUPS),
+            ("weekly", f"weekly_{iso_year}_W{iso_week:02d}.json", MAX_WEEKLY_BACKUPS),
+            ("monthly", f"monthly_{now.strftime('%Y%m')}.json", MAX_MONTHLY_BACKUPS),
+            ("yearly", f"yearly_{now.strftime('%Y')}.json", MAX_YEARLY_BACKUPS),
+        ]
+
+        for folder_name, file_name, keep_count in periodic_specs:
+            folder_path = os.path.join(backup_dir, folder_name)
+            try:
+                os.makedirs(folder_path, exist_ok=True)
+                self._mark_hidden(folder_path)
+
+                target_path = os.path.join(folder_path, file_name)
+                if not os.path.exists(target_path):
+                    shutil.copy2(data_path, target_path)
+                    self._mark_hidden(target_path)
+
+                self._cleanup_backup_group(folder_path, keep_count)
+            except OSError:
+                continue
+
+    def _cleanup_backup_group(self, folder_path: str, keep_count: int) -> None:
+        try:
+            files = [
+                os.path.join(folder_path, name)
+                for name in os.listdir(folder_path)
+                if name.lower().endswith(".json")
+            ]
+            files.sort(key=os.path.getmtime, reverse=True)
+            for old_file in files[keep_count:]:
+                try:
+                    os.remove(old_file)
+                except OSError:
+                    continue
+        except OSError:
+            return
+
     def show_save_status(self, text: str, success: bool) -> None:
         color = "#059669" if success else "#dc2626"
         self.save_status_label.setStyleSheet(f"color: {color}; font-size: 12px;")
-        self.save_status_label.setText(text)
+        now_text = datetime.now().strftime("%H:%M:%S")
+        self.save_status_label.setText(f"{now_text} {text}")
         QTimer.singleShot(2000, lambda: self.save_status_label.setText(""))
 
     def closeEvent(self, event: QCloseEvent) -> None:
