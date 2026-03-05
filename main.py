@@ -29,8 +29,8 @@ def _prepare_pyqt6_dll_path() -> None:
 
 _prepare_pyqt6_dll_path()
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction, QCloseEvent
+from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
+from PyQt6.QtGui import QAction, QCloseEvent, QRegion
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -86,6 +86,15 @@ class TodoApp(QWidget):
         self.current_sort_mode = "created_desc"
         self.collapsed_statuses: set[str] = set()
         self.hidden_statuses: set[str] = {STATUS_DELETED}
+        self.is_ball_mode = False
+        self.normal_geometry: QRect | None = None
+        self.normal_layout_margins = (0, 0, 0, 0)
+        self.normal_layout_spacing = 6
+        self._ball_drag_active = False
+        self._ball_drag_moved = False
+        self._ball_drag_start = QPoint()
+        self._ball_window_start = QPoint()
+        self._collapse_anchor_offset = QPoint(0, 0)
 
         self.setWindowTitle("Todo List")
         self.setMinimumWidth(380)
@@ -116,6 +125,9 @@ class TodoApp(QWidget):
         input_layout.addWidget(self.input_box)
         input_layout.addWidget(self.add_button)
 
+        self.input_row = QWidget()
+        self.input_row.setLayout(input_layout)
+
         self.todo_list = QListWidget()
         self.todo_list.itemDoubleClicked.connect(self.edit_todo_item)
         self.todo_list.itemClicked.connect(self.handle_list_item_clicked)
@@ -128,6 +140,11 @@ class TodoApp(QWidget):
         self.pin_button.setChecked(True)
         self.pin_button.setToolTip("切换窗口是否置顶")
         self.pin_button.clicked.connect(self.toggle_topmost)
+
+        self.collapse_button = QPushButton("●")
+        self.collapse_button.setObjectName("collapseButton")
+        self.collapse_button.setToolTip("收起为悬浮球")
+        self.collapse_button.installEventFilter(self)
 
         self.menu_button = QPushButton("菜单")
         self.menu = QMenu(self)
@@ -203,14 +220,24 @@ class TodoApp(QWidget):
         top_bar_layout.addStretch()
         top_bar_layout.addWidget(self.menu_button)
         top_bar_layout.addWidget(self.pin_button)
+        top_bar_layout.addWidget(self.collapse_button)
 
-        main_layout = QVBoxLayout()
-        main_layout.addWidget(self.top_bar)
-        main_layout.addWidget(self.stats_label)
-        main_layout.addLayout(input_layout)
-        main_layout.addWidget(self.todo_list)
-        main_layout.addWidget(self.save_status_label)
-        self.setLayout(main_layout)
+        self.ball_button = QPushButton("待办")
+        self.ball_button.setObjectName("floatingBall")
+        self.ball_button.setToolTip("点击恢复窗口")
+        self.ball_button.installEventFilter(self)
+        self.ball_button.hide()
+
+        self.main_layout = QVBoxLayout()
+        self.main_layout.addWidget(self.top_bar)
+        self.main_layout.addWidget(self.stats_label)
+        self.main_layout.addWidget(self.input_row)
+        self.main_layout.addWidget(self.todo_list)
+        self.main_layout.addWidget(self.save_status_label)
+        self.main_layout.addWidget(self.ball_button)
+        self.main_layout.setAlignment(self.ball_button, Qt.AlignmentFlag.AlignCenter)
+        self.setLayout(self.main_layout)
+        self.normal_layout_spacing = self.main_layout.spacing()
 
         self.setStyleSheet(
             """
@@ -260,6 +287,36 @@ class TodoApp(QWidget):
                 color: white;
                 border: 1px solid #1d4ed8;
             }
+            #collapseButton {
+                min-width: 28px;
+                max-width: 28px;
+                min-height: 28px;
+                max-height: 28px;
+                padding: 0;
+                border-radius: 14px;
+                background: #e5e7eb;
+                color: #374151;
+                border: 1px solid #d1d5db;
+                font-weight: 700;
+            }
+            #collapseButton:hover {
+                background: #d1d5db;
+            }
+            #floatingBall {
+                min-width: 71px;
+                max-width: 71px;
+                min-height: 71px;
+                max-height: 71px;
+                border-radius: 35px;
+                background: #2563eb;
+                color: white;
+                font-size: 14px;
+                font-weight: 700;
+                padding: 0;
+            }
+            #floatingBall:hover {
+                background: #1d4ed8;
+            }
             QListWidget {
                 border: 1px solid #e5e7eb;
                 border-radius: 10px;
@@ -271,6 +328,40 @@ class TodoApp(QWidget):
 
         self.load_todos()
         self.toggle_topmost(True)
+
+    def eventFilter(self, watched: object, event: QEvent) -> bool:
+        collapse_button = getattr(self, "collapse_button", None)
+        ball_button = getattr(self, "ball_button", None)
+
+        if collapse_button is not None and watched is collapse_button and not self.is_ball_mode:
+            if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick) and event.button() == Qt.MouseButton.LeftButton:
+                self.enter_ball_mode(event.globalPosition().toPoint())
+                return True
+
+        if ball_button is not None and watched is ball_button and self.is_ball_mode:
+            if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._ball_drag_active = True
+                    self._ball_drag_moved = False
+                    self._ball_drag_start = event.globalPosition().toPoint()
+                    self._ball_window_start = self.frameGeometry().topLeft()
+                    return True
+
+            if event.type() == QEvent.Type.MouseMove and self._ball_drag_active:
+                if event.buttons() & Qt.MouseButton.LeftButton:
+                    delta = event.globalPosition().toPoint() - self._ball_drag_start
+                    if delta.manhattanLength() > 2:
+                        self._ball_drag_moved = True
+                    self.move(self._ball_window_start + delta)
+                    return True
+
+            if event.type() == QEvent.Type.MouseButtonRelease and self._ball_drag_active:
+                self._ball_drag_active = False
+                if not self._ball_drag_moved:
+                    self.exit_ball_mode(event.globalPosition().toPoint())
+                return True
+
+        return super().eventFilter(watched, event)
 
     def get_data_path(self) -> str:
         if self._data_path:
@@ -793,6 +884,105 @@ class TodoApp(QWidget):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, is_topmost)
         if was_visible:
             self.show()
+
+    def _normal_window_flags(self) -> Qt.WindowType:
+        flags = Qt.WindowType.Window
+        if self.pin_button.isChecked():
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        return flags
+
+    def enter_ball_mode(self, anchor_global_pos: QPoint | None = None) -> None:
+        if self.is_ball_mode:
+            return
+
+        self.is_ball_mode = True
+        self.normal_geometry = self.geometry()
+        collapse_center_global = (
+            anchor_global_pos
+            if anchor_global_pos is not None
+            else self.collapse_button.mapToGlobal(self.collapse_button.rect().center())
+        )
+        self._collapse_anchor_offset = self.collapse_button.mapTo(self, self.collapse_button.rect().center())
+        margins = self.main_layout.contentsMargins()
+        self.normal_layout_margins = (margins.left(), margins.top(), margins.right(), margins.bottom())
+        self.normal_layout_spacing = self.main_layout.spacing()
+
+        self.top_bar.hide()
+        self.stats_label.hide()
+        self.input_row.hide()
+        self.todo_list.hide()
+        self.save_status_label.hide()
+
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+
+        ball_flags = Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
+        if self.pin_button.isChecked():
+            ball_flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(ball_flags)
+
+        ball_size = 84
+        visible_ball_size = 68
+        inset = (ball_size - visible_ball_size) // 2
+        self.setFixedSize(ball_size, ball_size)
+        self.setMask(QRegion(inset, inset, visible_ball_size, visible_ball_size, QRegion.RegionType.Ellipse))
+        self.main_layout.setContentsMargins(inset, inset, inset, inset)
+        self.ball_button.show()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.ball_button.setFocus(Qt.FocusReason.OtherFocusReason)
+
+        ball_top_left = collapse_center_global - QPoint(ball_size // 2, ball_size // 2)
+        self.move(ball_top_left)
+        self._align_ball_center(collapse_center_global)
+
+    def exit_ball_mode(self, anchor_global_pos: QPoint | None = None) -> None:
+        if not self.is_ball_mode:
+            return
+
+        ball_center_global = anchor_global_pos if anchor_global_pos is not None else self.mapToGlobal(self.rect().center())
+        self.is_ball_mode = False
+        self.ball_button.hide()
+
+        self.top_bar.show()
+        self.stats_label.show()
+        self.input_row.show()
+        self.todo_list.show()
+        self.save_status_label.show()
+
+        self.main_layout.setContentsMargins(*self.normal_layout_margins)
+        self.main_layout.setSpacing(self.normal_layout_spacing)
+
+        self.clearMask()
+        self.setWindowFlags(self._normal_window_flags())
+
+        self.setMinimumWidth(380)
+        self.setMinimumHeight(0)
+        self.setMaximumWidth(16777215)
+        self.setMaximumHeight(16777215)
+        if self.normal_geometry is not None:
+            width = self.normal_geometry.width()
+            height = self.normal_geometry.height()
+            target_top_left = ball_center_global - self._collapse_anchor_offset
+            self.setGeometry(target_top_left.x(), target_top_left.y(), width, height)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.update()
+        self._align_collapse_button_center(ball_center_global)
+
+    def _align_collapse_button_center(self, target_global_center: QPoint) -> None:
+        current_center = self.collapse_button.mapToGlobal(self.collapse_button.rect().center())
+        delta = target_global_center - current_center
+        if delta.manhattanLength() > 0:
+            self.move(self.x() + delta.x(), self.y() + delta.y())
+
+    def _align_ball_center(self, target_global_center: QPoint) -> None:
+        current_center = self.ball_button.mapToGlobal(self.ball_button.rect().center())
+        delta = target_global_center - current_center
+        if delta.manhattanLength() > 0:
+            self.move(self.x() + delta.x(), self.y() + delta.y())
 
     def export_json_file(self) -> None:
         file_path, _ = QFileDialog.getSaveFileName(
