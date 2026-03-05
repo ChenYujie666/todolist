@@ -45,6 +45,8 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QInputDialog,
     QPushButton,
+    QStyle,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -95,6 +97,10 @@ class TodoApp(QWidget):
         self._ball_drag_start = QPoint()
         self._ball_window_start = QPoint()
         self._collapse_anchor_offset = QPoint(0, 0)
+        self.tray_enabled = True
+        self.tray_icon: QSystemTrayIcon | None = None
+        self.tray_mode_notice_shown = False
+        self._force_quit = False
 
         self.setWindowTitle("Todo List")
         self.setMinimumWidth(380)
@@ -152,6 +158,13 @@ class TodoApp(QWidget):
         self.sort_menu = self.menu.addMenu("排序")
         self.filter_menu = self.menu.addMenu("按状态分类")
         self.hide_status_menu = self.menu.addMenu("隐藏状态")
+
+        self.tray_mode_action = QAction("启用托盘模式", self)
+        self.tray_mode_action.setCheckable(True)
+        self.tray_mode_action.setChecked(self.tray_enabled)
+        self.tray_mode_action.toggled.connect(self.set_tray_mode_enabled)
+        self.menu.addAction(self.tray_mode_action)
+        self.menu.addSeparator()
 
         self.save_json_action = QAction("Save JSON", self)
         self.save_json_action.triggered.connect(self.export_json_file)
@@ -328,6 +341,67 @@ class TodoApp(QWidget):
 
         self.load_todos()
         self.toggle_topmost(True)
+        self.setup_system_tray()
+
+    def setup_system_tray(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray_enabled = False
+            self.tray_mode_action.setChecked(False)
+            self.tray_mode_action.setEnabled(False)
+            self.tray_mode_action.setToolTip("当前系统不可用托盘")
+            return
+
+        tray_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        self.tray_icon = QSystemTrayIcon(tray_icon, self)
+        self.tray_icon.setToolTip("Todo List")
+
+        tray_menu = QMenu(self)
+        show_action = QAction("显示主窗口", self)
+        show_action.triggered.connect(self.show_from_tray)
+        tray_menu.addAction(show_action)
+
+        quit_action = QAction("退出", self)
+        quit_action.triggered.connect(self.quit_from_tray)
+        tray_menu.addAction(quit_action)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.handle_tray_activated)
+        self.tray_icon.show()
+
+    def set_tray_mode_enabled(self, enabled: bool) -> None:
+        self.tray_enabled = bool(enabled)
+        was_visible = self.isVisible()
+        if self.is_ball_mode:
+            self.setWindowFlags(self._ball_window_flags())
+        else:
+            self.setWindowFlags(self._normal_window_flags())
+        if was_visible:
+            self.show()
+
+    def handle_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            self.show_from_tray()
+
+    def show_from_tray(self) -> None:
+        self.showNormal()
+        self.show()
+        if self.tray_enabled and not self.is_ball_mode:
+            self.enter_ball_mode()
+        self.raise_()
+        self.activateWindow()
+
+    def quit_from_tray(self) -> None:
+        self._force_quit = True
+        self.tray_enabled = False
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
+        self.close()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     def eventFilter(self, watched: object, event: QEvent) -> bool:
         collapse_button = getattr(self, "collapse_button", None)
@@ -801,6 +875,25 @@ class TodoApp(QWidget):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.save_todos()
+
+        if (
+            self.tray_enabled
+            and not self._force_quit
+            and self.tray_icon is not None
+            and self.tray_icon.isVisible()
+        ):
+            event.ignore()
+            self.showNormal()
+            self.show()
+            if not self.is_ball_mode:
+                self.enter_ball_mode()
+            if not self.tray_mode_notice_shown:
+                self.tray_icon.showMessage("Todo List", "应用已切换为悬浮窗模式", QSystemTrayIcon.MessageIcon.Information, 2000)
+                self.tray_mode_notice_shown = True
+            return
+
+        if self.tray_icon is not None:
+            self.tray_icon.hide()
         super().closeEvent(event)
 
     def load_todos(self) -> None:
@@ -886,7 +979,13 @@ class TodoApp(QWidget):
             self.show()
 
     def _normal_window_flags(self) -> Qt.WindowType:
-        flags = Qt.WindowType.Window
+        flags = Qt.WindowType.Tool if self.tray_enabled else Qt.WindowType.Window
+        if self.pin_button.isChecked():
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        return flags
+
+    def _ball_window_flags(self) -> Qt.WindowType:
+        flags = (Qt.WindowType.Tool if self.tray_enabled else Qt.WindowType.Window) | Qt.WindowType.FramelessWindowHint
         if self.pin_button.isChecked():
             flags |= Qt.WindowType.WindowStaysOnTopHint
         return flags
@@ -916,10 +1015,7 @@ class TodoApp(QWidget):
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
-        ball_flags = Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint
-        if self.pin_button.isChecked():
-            ball_flags |= Qt.WindowType.WindowStaysOnTopHint
-        self.setWindowFlags(ball_flags)
+        self.setWindowFlags(self._ball_window_flags())
 
         ball_size = 84
         visible_ball_size = 68
@@ -1139,4 +1235,6 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = TodoApp()
     window.show()
+    if window.tray_enabled:
+        window.enter_ball_mode()
     sys.exit(app.exec())
