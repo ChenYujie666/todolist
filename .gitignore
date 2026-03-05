@@ -1,0 +1,11 @@
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build / packaging outputs
+build/
+dist/
+
+# PyInstaller intermediate file
+*.spec
