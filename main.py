@@ -386,10 +386,11 @@ class TodoApp(QWidget):
             self.show_from_tray()
 
     def show_from_tray(self) -> None:
-        self.showNormal()
-        self.show()
-        if self.tray_enabled and not self.is_ball_mode:
-            self.enter_ball_mode()
+        if self.is_ball_mode:
+            self.exit_ball_mode(self.mapToGlobal(self.rect().center()))
+        else:
+            self.showNormal()
+            self.show()
         self.raise_()
         self.activateWindow()
 
