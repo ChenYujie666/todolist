@@ -30,7 +30,7 @@ def _prepare_pyqt6_dll_path() -> None:
 _prepare_pyqt6_dll_path()
 
 from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
-from PyQt6.QtGui import QAction, QCloseEvent, QRegion
+from PyQt6.QtGui import QAction, QCloseEvent, QIcon, QRegion
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -68,6 +68,11 @@ STATUS_DELETED = "已删除"
 STATUS_ALL = "全部"
 STATUS_OPTIONS = [STATUS_IN_PROGRESS, STATUS_LATER, STATUS_DONE]
 STATUS_FILTER_OPTIONS = [STATUS_IN_PROGRESS, STATUS_LATER, STATUS_DONE, STATUS_DELETED]
+
+
+def get_resource_path(relative_path: str) -> str:
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
 
 
 @dataclass
@@ -352,6 +357,12 @@ class TodoApp(QWidget):
             return
 
         tray_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        tray_icon_path = get_resource_path(os.path.join("assets", "icons", "todolist.ico"))
+        if os.path.isfile(tray_icon_path):
+            custom_icon = QIcon(tray_icon_path)
+            if not custom_icon.isNull():
+                tray_icon = custom_icon
+
         self.tray_icon = QSystemTrayIcon(tray_icon, self)
         self.tray_icon.setToolTip("Todo List")
 

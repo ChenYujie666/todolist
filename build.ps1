@@ -7,9 +7,6 @@ if (-not (Test-Path ".venv/Scripts/python.exe")) {
 & .venv/Scripts/python.exe -m PyInstaller `
     --noconfirm `
     --clean `
-    --onefile `
-    --windowed `
-    --name TodoList `
-    main.py
+    TodoList.spec
 
 Write-Host "Build complete: dist/TodoList.exe"
