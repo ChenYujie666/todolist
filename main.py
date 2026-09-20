@@ -59,7 +59,6 @@ DATA_FILE = "todos.json"
 APP_DIR_NAME = "TodoList"
 HIDDEN_DATA_FILE = ".todos.json"
 BACKUP_DIR_NAME = "backups"
-TASKBAR_SHORTCUT_COUNT = 7
 MAX_BACKUP_FILES = 20
 MAX_DAILY_BACKUPS = 30
 MAX_WEEKLY_BACKUPS = 26
@@ -211,7 +210,7 @@ class TodoApp(QWidget):
 
         taskbar_shortcuts = self._get_taskbar_shortcut_paths()
         self.app_shortcuts: list[dict[str, str]] = []
-        for index in range(TASKBAR_SHORTCUT_COUNT):
+        for index in range(len(taskbar_shortcuts)):
             shortcut_path = taskbar_shortcuts[index] if index < len(taskbar_shortcuts) else ""
             self.app_shortcuts.append(
                 {
@@ -221,7 +220,7 @@ class TodoApp(QWidget):
                 }
             )
         self.shortcut_buttons: list[QPushButton] = []
-        self.shortcut_open_states: list[bool] = [False] * TASKBAR_SHORTCUT_COUNT
+        self.shortcut_open_states: list[bool] = [False] * len(self.app_shortcuts)
         self._shortcut_icon_provider = QFileIconProvider()
         self._ball_size = 84
         self._ball_visible_size = 68
@@ -532,7 +531,7 @@ class TodoApp(QWidget):
         self._refresh_app_shortcut_button(index)
 
     def _get_taskbar_shortcut_paths(self) -> list[str]:
-        """Return taskbar-pinned shortcuts in the order Windows exposes them."""
+        """Return taskbar-pinned shortcuts in Windows' actual Win+number order."""
         if os.name != "nt":
             return []
         app_data = os.getenv("APPDATA")
@@ -549,22 +548,41 @@ class TodoApp(QWidget):
         if not os.path.isdir(pinned_dir):
             return []
 
-        # These two are resolved first because the shell can enumerate pinned
-        # shortcuts alphabetically while Win+number follows taskbar order.
-        preferred_names = ["Microsoft Edge.lnk", "File Explorer.lnk"]
-        paths: list[str] = []
-        for name in preferred_names:
-            path = os.path.join(pinned_dir, name)
-            if os.path.isfile(path):
-                paths.append(path)
-        if len(paths) >= 2:
-            return paths
+        files_by_name = {
+            name: os.path.join(pinned_dir, name)
+            for name in os.listdir(pinned_dir)
+            if name.casefold().endswith(".lnk")
+        }
+        if not files_by_name:
+            return []
 
-        for name in os.listdir(pinned_dir):
-            path = os.path.join(pinned_dir, name)
-            if name.lower().endswith(".lnk") and path not in paths:
-                paths.append(path)
-        return paths
+        ordered_names: list[str] = []
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband",
+            ) as taskband_key:
+                favorites = winreg.QueryValueEx(taskband_key, "Favorites")[0]
+            # Favorites stores the pinned shortcut names in taskbar order.
+            # Searching the UTF-16LE byte representation preserves that order
+            # without depending on locale or filesystem enumeration order.
+            positions = []
+            for filename, path in files_by_name.items():
+                position = favorites.find(filename.encode("utf-16le"))
+                if position >= 0:
+                    positions.append((position, filename, path))
+            positions.sort(key=lambda item: item[0])
+            ordered_names.extend(path for _, _, path in positions)
+        except (OSError, ImportError, TypeError):
+            pass
+
+        # Keep any shortcut not represented in Favorites usable as a fallback.
+        for filename, path in sorted(files_by_name.items(), key=lambda item: item[0].casefold()):
+            if path not in ordered_names:
+                ordered_names.append(path)
+        return ordered_names
 
     def _get_taskbar_icon_source(self, shortcut_path: str) -> str:
         """Resolve icon sources for the two common Windows taskbar shortcuts."""
@@ -573,6 +591,21 @@ class TodoApp(QWidget):
 
         shortcut_name = os.path.basename(shortcut_path).casefold()
         candidates: list[str] = []
+        try:
+            import win32com.client
+
+            shell = win32com.client.Dispatch("WScript.Shell")
+            shortcut = shell.CreateShortcut(shortcut_path)
+            target_path = os.path.expandvars(shortcut.Targetpath or "")
+            icon_location = os.path.expandvars(shortcut.IconLocation or "")
+            if target_path and os.path.isfile(target_path):
+                candidates.append(target_path)
+            icon_file = icon_location.rsplit(",", 1)[0].strip()
+            if icon_file and os.path.isfile(icon_file):
+                candidates.insert(0, icon_file)
+        except Exception:
+            pass
+
         if shortcut_name == "microsoft edge.lnk":
             for env_name in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
                 base_dir = os.getenv(env_name)
@@ -581,6 +614,14 @@ class TodoApp(QWidget):
         elif shortcut_name == "file explorer.lnk":
             windows_dir = os.getenv("WINDIR", r"C:\Windows")
             candidates.append(os.path.join(windows_dir, "explorer.exe"))
+        elif shortcut_name == "remote desktop connection.lnk":
+            windows_dir = os.getenv("WINDIR", r"C:\Windows")
+            candidates.append(os.path.join(windows_dir, "System32", "mstsc.exe"))
+        elif shortcut_name == "visual studio code.lnk":
+            for base_dir in (os.getenv("LOCALAPPDATA"), os.getenv("ProgramFiles")):
+                if base_dir:
+                    candidates.append(os.path.join(base_dir, "Programs", "Microsoft VS Code", "Code.exe"))
+                    candidates.append(os.path.join(base_dir, "Microsoft VS Code", "Code.exe"))
 
         return next((path for path in candidates if os.path.isfile(path)), shortcut_path)
 
