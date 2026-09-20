@@ -5,6 +5,7 @@ import importlib.util
 import ctypes
 import tempfile
 import shutil
+import subprocess
 from datetime import datetime
 from dataclasses import dataclass, asdict
 
@@ -29,13 +30,14 @@ def _prepare_pyqt6_dll_path() -> None:
 
 _prepare_pyqt6_dll_path()
 
-from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
-from PyQt6.QtGui import QAction, QCloseEvent, QIcon, QRegion
+from PyQt6.QtCore import QEvent, QFileInfo, QPoint, QRect, QSize, Qt, QTimer
+from PyQt6.QtGui import QAction, QCloseEvent, QIcon, QImage, QPixmap, QRegion
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFileIconProvider,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -75,6 +77,104 @@ def get_resource_path(relative_path: str) -> str:
     return os.path.join(base_path, relative_path)
 
 
+def get_windows_file_icon(path: str, size: int = 32) -> QIcon:
+    """Render a Windows Shell file icon into a Qt icon."""
+    if os.name != "nt" or not path or not os.path.exists(path):
+        return QIcon()
+
+    class SHFILEINFOW(ctypes.Structure):
+        _fields_ = [
+            ("hIcon", ctypes.c_void_p),
+            ("iIcon", ctypes.c_int),
+            ("dwAttributes", ctypes.c_uint32),
+            ("szDisplayName", ctypes.c_wchar * 260),
+            ("szTypeName", ctypes.c_wchar * 80),
+        ]
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize", ctypes.c_uint32),
+            ("biWidth", ctypes.c_int32),
+            ("biHeight", ctypes.c_int32),
+            ("biPlanes", ctypes.c_uint16),
+            ("biBitCount", ctypes.c_uint16),
+            ("biCompression", ctypes.c_uint32),
+            ("biSizeImage", ctypes.c_uint32),
+            ("biXPelsPerMeter", ctypes.c_int32),
+            ("biYPelsPerMeter", ctypes.c_int32),
+            ("biClrUsed", ctypes.c_uint32),
+            ("biClrImportant", ctypes.c_uint32),
+        ]
+
+    class BITMAPINFO(ctypes.Structure):
+        _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", ctypes.c_uint32 * 1)]
+
+    shell32 = ctypes.windll.shell32
+    user32 = ctypes.windll.user32
+    gdi32 = ctypes.windll.gdi32
+    shell32.SHGetFileInfoW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(SHFILEINFOW),
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+    ]
+    shell32.SHGetFileInfoW.restype = ctypes.c_size_t
+    gdi32.CreateCompatibleDC.restype = ctypes.c_void_p
+    gdi32.CreateDIBSection.restype = ctypes.c_void_p
+    gdi32.SelectObject.restype = ctypes.c_void_p
+
+    shell_info = SHFILEINFOW()
+    if not shell32.SHGetFileInfoW(
+        path,
+        0,
+        ctypes.byref(shell_info),
+        ctypes.sizeof(shell_info),
+        0x000000100,  # SHGFI_ICON; Windows chooses the matching file/resource icon.
+    ):
+        return QIcon()
+
+    bitmap = ctypes.c_void_p()
+    device_context = ctypes.c_void_p()
+    old_bitmap = ctypes.c_void_p()
+    try:
+        bitmap_info = BITMAPINFO()
+        bitmap_info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        bitmap_info.bmiHeader.biWidth = size
+        bitmap_info.bmiHeader.biHeight = -size  # Top-down pixels.
+        bitmap_info.bmiHeader.biPlanes = 1
+        bitmap_info.bmiHeader.biBitCount = 32
+
+        pixels = ctypes.c_void_p()
+        bitmap = ctypes.c_void_p(
+            gdi32.CreateDIBSection(None, ctypes.byref(bitmap_info), 0, ctypes.byref(pixels), None, 0)
+        )
+        device_context = ctypes.c_void_p(gdi32.CreateCompatibleDC(None))
+        if not bitmap.value or not device_context.value or not pixels.value:
+            return QIcon()
+
+        old_bitmap = ctypes.c_void_p(gdi32.SelectObject(device_context, bitmap))
+        if not user32.DrawIconEx(device_context, 0, 0, shell_info.hIcon, size, size, 0, None, 0x0003):
+            return QIcon()
+
+        pixel_data = bytearray(ctypes.string_at(pixels, size * size * 4))
+        if not any(pixel_data[3::4]):
+            for offset in range(0, len(pixel_data), 4):
+                if pixel_data[offset] or pixel_data[offset + 1] or pixel_data[offset + 2]:
+                    pixel_data[offset + 3] = 255
+        image = QImage(bytes(pixel_data), size, size, size * 4, QImage.Format.Format_ARGB32).copy()
+        return QIcon(QPixmap.fromImage(image))
+    finally:
+        if old_bitmap.value and device_context.value:
+            gdi32.SelectObject(device_context, old_bitmap)
+        if bitmap.value:
+            gdi32.DeleteObject(bitmap)
+        if device_context.value:
+            gdi32.DeleteDC(device_context)
+        if shell_info.hIcon:
+            user32.DestroyIcon(shell_info.hIcon)
+
+
 @dataclass
 class TodoItem:
     text: str
@@ -106,6 +206,31 @@ class TodoApp(QWidget):
         self.tray_icon: QSystemTrayIcon | None = None
         self.tray_mode_notice_shown = False
         self._force_quit = False
+
+        taskbar_shortcuts = self._get_taskbar_shortcut_paths()
+        self.app_shortcuts: list[dict[str, str]] = [
+            {
+                "label": "Win+1",
+                "path": taskbar_shortcuts[0] if len(taskbar_shortcuts) > 0 else "",
+                "icon_path": self._get_taskbar_icon_source(taskbar_shortcuts[0])
+                if len(taskbar_shortcuts) > 0
+                else "",
+            },
+            {
+                "label": "Win+2",
+                "path": taskbar_shortcuts[1] if len(taskbar_shortcuts) > 1 else "",
+                "icon_path": self._get_taskbar_icon_source(taskbar_shortcuts[1])
+                if len(taskbar_shortcuts) > 1
+                else "",
+            },
+        ]
+        self.shortcut_buttons: list[QPushButton] = []
+        self._shortcut_icon_provider = QFileIconProvider()
+        self._ball_size = 84
+        self._ball_visible_size = 68
+        self._shortcut_button_width = 64
+        self._shortcut_button_height = 52
+        self._shortcut_gap = 4
 
         self.setWindowTitle("Todo List")
         self.setMinimumWidth(380)
@@ -246,6 +371,27 @@ class TodoApp(QWidget):
         self.ball_button.installEventFilter(self)
         self.ball_button.hide()
 
+        self.shortcut_panel = QWidget()
+        self.shortcut_panel.setObjectName("floatingShortcuts")
+        shortcut_layout = QVBoxLayout(self.shortcut_panel)
+        shortcut_layout.setContentsMargins(0, 0, 0, 0)
+        shortcut_layout.setSpacing(self._shortcut_gap)
+        shortcut_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        for index in range(len(self.app_shortcuts)):
+            shortcut_button = QPushButton()
+            shortcut_button.setObjectName(f"appShortcutButton{index + 1}")
+            shortcut_button.setFixedSize(self._shortcut_button_width, self._shortcut_button_height)
+            shortcut_button.setToolTip(self.app_shortcuts[index]["label"])
+            shortcut_button.setText(str(index + 1))
+            shortcut_button.clicked.connect(lambda checked=False, i=index: self.activate_taskbar_app(i))
+            shortcut_button.hide()
+            shortcut_layout.addWidget(shortcut_button, alignment=Qt.AlignmentFlag.AlignCenter)
+            self.shortcut_buttons.append(shortcut_button)
+        # Keep the panel inside the same 84 px window as the ball.  The
+        # surrounding 8 px inset is reserved for the ball's circular mask.
+        self.shortcut_panel.setFixedWidth(self._ball_visible_size)
+        self.shortcut_panel.hide()
+
         self.main_layout = QVBoxLayout()
         self.main_layout.addWidget(self.top_bar)
         self.main_layout.addWidget(self.stats_label)
@@ -253,7 +399,9 @@ class TodoApp(QWidget):
         self.main_layout.addWidget(self.todo_list)
         self.main_layout.addWidget(self.save_status_label)
         self.main_layout.addWidget(self.ball_button)
+        self.main_layout.addWidget(self.shortcut_panel)
         self.main_layout.setAlignment(self.ball_button, Qt.AlignmentFlag.AlignCenter)
+        self.main_layout.setAlignment(self.shortcut_panel, Qt.AlignmentFlag.AlignCenter)
         self.setLayout(self.main_layout)
         self.normal_layout_spacing = self.main_layout.spacing()
 
@@ -335,6 +483,22 @@ class TodoApp(QWidget):
             #floatingBall:hover {
                 background: #1d4ed8;
             }
+            #floatingShortcuts {
+                background: transparent;
+            }
+            #appShortcutButton1, #appShortcutButton2 {
+                border: 1px solid #d1d5db;
+                border-radius: 10px;
+                padding: 0;
+                background: rgba(255, 255, 255, 245);
+                color: #374151;
+                font-size: 13px;
+                font-weight: 700;
+            }
+            #appShortcutButton1:hover, #appShortcutButton2:hover {
+                background: #eff6ff;
+                border-color: #2563eb;
+            }
             QListWidget {
                 border: 1px solid #e5e7eb;
                 border-radius: 10px;
@@ -347,6 +511,164 @@ class TodoApp(QWidget):
         self.load_todos()
         self.toggle_topmost(True)
         self.setup_system_tray()
+
+    def set_app_shortcut(
+        self,
+        index: int,
+        path: str = "",
+        *,
+        label: str | None = None,
+        icon_path: str | None = None,
+    ) -> None:
+        """Configure one floating launcher slot (0 = Win+1, 1 = Win+2)."""
+        if index < 0 or index >= len(self.app_shortcuts):
+            raise IndexError(f"invalid app shortcut index: {index}")
+
+        config = self.app_shortcuts[index]
+        config["path"] = os.fspath(path) if path else ""
+        if label is not None:
+            config["label"] = str(label)
+        if icon_path is not None:
+            config["icon_path"] = os.fspath(icon_path) if icon_path else ""
+        elif path and not config.get("icon_path"):
+            config["icon_path"] = os.fspath(path)
+        self._refresh_app_shortcut_button(index)
+
+    def _get_taskbar_shortcut_paths(self) -> list[str]:
+        """Return taskbar-pinned shortcuts in the order Windows exposes them."""
+        if os.name != "nt":
+            return []
+        app_data = os.getenv("APPDATA")
+        if not app_data:
+            return []
+        pinned_dir = os.path.join(
+            app_data,
+            "Microsoft",
+            "Internet Explorer",
+            "Quick Launch",
+            "User Pinned",
+            "TaskBar",
+        )
+        if not os.path.isdir(pinned_dir):
+            return []
+
+        preferred_names = ["Microsoft Edge.lnk", "File Explorer.lnk"]
+        paths: list[str] = []
+        for name in preferred_names:
+            path = os.path.join(pinned_dir, name)
+            if os.path.isfile(path):
+                paths.append(path)
+        if len(paths) >= 2:
+            return paths
+
+        for name in os.listdir(pinned_dir):
+            path = os.path.join(pinned_dir, name)
+            if name.lower().endswith(".lnk") and path not in paths:
+                paths.append(path)
+        return paths
+
+    def _get_taskbar_icon_source(self, shortcut_path: str) -> str:
+        """Resolve icon sources for the two common Windows taskbar shortcuts."""
+        if not shortcut_path or os.name != "nt":
+            return shortcut_path
+
+        shortcut_name = os.path.basename(shortcut_path).casefold()
+        candidates: list[str] = []
+        if shortcut_name == "microsoft edge.lnk":
+            for env_name in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
+                base_dir = os.getenv(env_name)
+                if base_dir:
+                    candidates.append(os.path.join(base_dir, "Microsoft", "Edge", "Application", "msedge.exe"))
+        elif shortcut_name == "file explorer.lnk":
+            windows_dir = os.getenv("WINDIR", r"C:\Windows")
+            candidates.append(os.path.join(windows_dir, "explorer.exe"))
+
+        return next((path for path in candidates if os.path.isfile(path)), shortcut_path)
+
+    def activate_taskbar_app(self, index: int) -> None:
+        """Invoke Windows' native Win+number taskbar shortcut."""
+        if index < 0 or index >= len(self.app_shortcuts):
+            return
+        if os.name == "nt":
+            self._send_windows_number_key(index + 1)
+            return
+
+        path = self.app_shortcuts[index].get("path", "")
+        if path:
+            try:
+                subprocess.Popen([path])
+            except OSError:
+                pass
+
+    def _send_windows_number_key(self, number: int) -> None:
+        if not 1 <= number <= 9:
+            return
+        user32 = ctypes.windll.user32
+        key_code = ord(str(number))
+        key_up = 0x0002
+        user32.keybd_event(0x5B, 0, 0, 0)  # Left Windows key down
+        user32.keybd_event(key_code, 0, 0, 0)
+        user32.keybd_event(key_code, 0, key_up, 0)
+        user32.keybd_event(0x5B, 0, key_up, 0)
+
+    def configure_app_shortcut(
+        self,
+        index: int,
+        path: str = "",
+        *,
+        label: str | None = None,
+        icon_path: str | None = None,
+    ) -> None:
+        """Backward-compatible alias with a more explicit name."""
+        self.set_app_shortcut(index, path, label=label, icon_path=icon_path)
+
+    def get_app_shortcuts(self) -> list[dict[str, str]]:
+        """Return a copy suitable for hotkey/launcher integration."""
+        return [dict(config) for config in self.app_shortcuts]
+
+    def get_app_shortcut_button(self, index: int) -> QPushButton:
+        """Return the button corresponding to Win+(index + 1)."""
+        if index < 0 or index >= len(self.shortcut_buttons):
+            raise IndexError(f"invalid app shortcut index: {index}")
+        return self.shortcut_buttons[index]
+
+    def _refresh_app_shortcut_button(self, index: int) -> None:
+        button = self.shortcut_buttons[index]
+        config = self.app_shortcuts[index]
+        label = config.get("label") or f"Win+{index + 1}"
+        path = config.get("path", "")
+        icon_path = config.get("icon_path", "") or path
+
+        icon = QIcon()
+        if icon_path and os.path.exists(icon_path):
+            icon = get_windows_file_icon(icon_path, 48)
+            if icon.isNull():
+                icon = self._shortcut_icon_provider.icon(QFileInfo(icon_path))
+            if icon.isNull():
+                icon = QIcon(icon_path)
+        if icon.isNull():
+            icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+
+        button.setIcon(icon)
+        button.setIconSize(QSize(34, 34))
+        button.setText("" if path else str(index + 1))
+        button.setToolTip(f"{label}\n{path}" if path else f"{label}（未配置）")
+        if self.is_ball_mode:
+            QTimer.singleShot(0, self._update_ball_mask)
+
+    def _update_ball_mask(self) -> None:
+        if not self.is_ball_mode:
+            return
+        ball_rect = self.ball_button.geometry()
+        visible_size = min(self._ball_visible_size, ball_rect.width(), ball_rect.height())
+        ball_x = ball_rect.center().x() - visible_size // 2
+        ball_y = ball_rect.center().y() - visible_size // 2
+        region = QRegion(QRect(ball_x, ball_y, visible_size, visible_size), QRegion.RegionType.Ellipse)
+        for button in self.shortcut_buttons:
+            if button.isVisible():
+                top_left = button.mapTo(self, QPoint(0, 0))
+                region = region.united(QRegion(QRect(top_left, button.size())))
+        self.setMask(region)
 
     def setup_system_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -398,7 +720,7 @@ class TodoApp(QWidget):
 
     def show_from_tray(self) -> None:
         if self.is_ball_mode:
-            self.exit_ball_mode(self.mapToGlobal(self.rect().center()))
+            self.exit_ball_mode(self.ball_button.mapToGlobal(self.ball_button.rect().center()))
         else:
             self.showNormal()
             self.show()
@@ -1057,17 +1379,23 @@ class TodoApp(QWidget):
         self.input_row.hide()
         self.todo_list.hide()
         self.save_status_label.hide()
+        self.shortcut_panel.show()
+        for button in self.shortcut_buttons:
+            button.show()
+        for index in range(len(self.shortcut_buttons)):
+            self._refresh_app_shortcut_button(index)
 
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
         self.setWindowFlags(self._ball_window_flags())
 
-        ball_size = 84
-        visible_ball_size = 68
+        ball_size = self._ball_size
+        visible_ball_size = self._ball_visible_size
         inset = (ball_size - visible_ball_size) // 2
-        self.setFixedSize(ball_size, ball_size)
-        self.setMask(QRegion(inset, inset, visible_ball_size, visible_ball_size, QRegion.RegionType.Ellipse))
+        self.shortcut_panel.adjustSize()
+        ball_height = ball_size + self.shortcut_panel.sizeHint().height()
+        self.setFixedSize(ball_size, ball_height)
         self.main_layout.setContentsMargins(inset, inset, inset, inset)
         self.ball_button.show()
         self.show()
@@ -1078,14 +1406,22 @@ class TodoApp(QWidget):
         ball_top_left = collapse_center_global - QPoint(ball_size // 2, ball_size // 2)
         self.move(ball_top_left)
         self._align_ball_center(collapse_center_global)
+        self._update_ball_mask()
 
     def exit_ball_mode(self, anchor_global_pos: QPoint | None = None) -> None:
         if not self.is_ball_mode:
             return
 
-        ball_center_global = anchor_global_pos if anchor_global_pos is not None else self.mapToGlobal(self.rect().center())
+        ball_center_global = (
+            anchor_global_pos
+            if anchor_global_pos is not None
+            else self.ball_button.mapToGlobal(self.ball_button.rect().center())
+        )
         self.is_ball_mode = False
         self.ball_button.hide()
+        self.shortcut_panel.hide()
+        for button in self.shortcut_buttons:
+            button.hide()
 
         self.top_bar.show()
         self.stats_label.show()
