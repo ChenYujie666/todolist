@@ -5,10 +5,18 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   check:
-    name: Syntax Check
-    runs-on: ubuntu-latest
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      QT_QPA_PLATFORM: offscreen
 
     steps:
       - name: Checkout
@@ -23,11 +31,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
-      - name: Compile check
-        run: |
-          python -m py_compile main.py
+      - name: Install Qt runtime libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libopengl0
+
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
 
   build-windows:
     name: Build Windows EXE
@@ -47,11 +58,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
       - name: Build with PyInstaller
-        run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name TodoList main.py
+        shell: pwsh
+        run: ./build.ps1 -PythonExecutable python
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4

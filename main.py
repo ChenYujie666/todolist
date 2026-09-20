@@ -551,7 +551,9 @@ class TodoApp(QWidget):
             grouped[todo.status].append((index, todo))
 
         for status in STATUS_FILTER_OPTIONS:
-            if status in self.hidden_statuses:
+            # An explicit status filter should always be visible, even when
+            # that status is hidden in the unfiltered grouped view.
+            if self.current_status_filter == STATUS_ALL and status in self.hidden_statuses:
                 continue
 
             todos_in_group = grouped[status]
@@ -618,7 +620,10 @@ class TodoApp(QWidget):
                 row_layout.addStretch()
                 row_layout.addWidget(status_combo)
 
-                item = QListWidgetItem(self.todo_list)
+                # Create the item first, then insert it exactly once. Passing the
+                # list widget to QListWidgetItem's constructor already inserts it;
+                # adding it again can produce duplicate/unstable rows in Qt.
+                item = QListWidgetItem()
                 item.setData(Qt.ItemDataRole.UserRole, index)
                 item.setSizeHint(row_widget.sizeHint())
                 self.todo_list.addItem(item)
@@ -917,24 +922,13 @@ class TodoApp(QWidget):
                 try:
                     with open(legacy_path, "r", encoding="utf-8") as file:
                         data = json.load(file)
-                    self.todos = [
-                        TodoItem(
-                            text=item.get("text", ""),
-                            done=item.get("done", False),
-                            created_at=item.get("created_at") or self._now_text(),
-                            checked_at=item.get("checked_at"),
-                            status=item.get("status")
-                            if item.get("status") in STATUS_FILTER_OPTIONS
-                            else (STATUS_DONE if item.get("done", False) else STATUS_IN_PROGRESS),
-                        )
-                        for item in data
-                    ]
+                    self.todos = self._todos_from_data(data)
                     self.save_todos()
                     try:
                         os.remove(legacy_path)
                     except OSError:
                         pass
-                except (json.JSONDecodeError, OSError):
+                except (json.JSONDecodeError, OSError, ValueError):
                     self.todos = []
                 self.refresh_list()
             return
@@ -942,21 +936,61 @@ class TodoApp(QWidget):
         try:
             with open(path, "r", encoding="utf-8") as file:
                 data = json.load(file)
-            self.todos = [
-                TodoItem(
-                    text=item.get("text", ""),
-                    done=item.get("done", False),
-                    created_at=item.get("created_at") or self._now_text(),
-                    checked_at=item.get("checked_at"),
-                    status=item.get("status")
-                    if item.get("status") in STATUS_FILTER_OPTIONS
-                    else (STATUS_DONE if item.get("done", False) else STATUS_IN_PROGRESS),
-                )
-                for item in data
-            ]
+            self.todos = self._todos_from_data(data)
             self.refresh_list()
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError, ValueError):
             self.todos = []
+
+    def _todos_from_data(self, data: object) -> list[TodoItem]:
+        """Parse persisted data while tolerating old or partially invalid entries."""
+        if not isinstance(data, list):
+            raise ValueError("todo data must be a JSON array")
+
+        todos: list[TodoItem] = []
+        for item in data:
+            todo = self._todo_from_dict(item)
+            if todo is not None:
+                todos.append(todo)
+        return todos
+
+    def _todo_from_dict(self, item: object) -> TodoItem | None:
+        if not isinstance(item, dict):
+            return None
+
+        text = str(item.get("text", "")).strip()
+        if not text:
+            return None
+
+        created_at = item.get("created_at")
+        if not isinstance(created_at, str) or not created_at.strip():
+            created_at = self._now_text()
+
+        checked_at = item.get("checked_at")
+        if not isinstance(checked_at, str) or not checked_at.strip():
+            checked_at = None
+
+        done = bool(item.get("done", False))
+        status = item.get("status")
+        if status not in STATUS_FILTER_OPTIONS:
+            status = STATUS_DONE if done else STATUS_IN_PROGRESS
+
+        if status == STATUS_DONE:
+            done = True
+            checked_at = checked_at or self._now_text()
+        elif status == STATUS_DELETED:
+            done = False
+            checked_at = None
+        else:
+            done = False
+            checked_at = None
+
+        return TodoItem(
+            text=text,
+            done=done,
+            created_at=created_at,
+            checked_at=checked_at,
+            status=status,
+        )
 
     def _migrate_from_other_data_paths(self, target_path: str) -> None:
         if os.path.exists(target_path):
@@ -1134,34 +1168,7 @@ class TodoApp(QWidget):
             QMessageBox.warning(self, "Load JSON", "读取失败，JSON 必须是数组")
             return
 
-        todos: list[TodoItem] = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            text = str(item.get("text", "")).strip()
-            if not text:
-                continue
-            done = bool(item.get("done", False))
-            created_at = item.get("created_at") or self._now_text()
-            checked_at = item.get("checked_at")
-            status = item.get("status") if item.get("status") in STATUS_FILTER_OPTIONS else None
-            if not status:
-                status = STATUS_DONE if done else STATUS_IN_PROGRESS
-            if done and not checked_at:
-                checked_at = self._now_text()
-            if not done:
-                checked_at = None
-            if status == STATUS_DONE:
-                done = True
-                if not checked_at:
-                    checked_at = self._now_text()
-            elif status == STATUS_DELETED:
-                done = False
-                checked_at = None
-            else:
-                done = False
-                checked_at = None
-            todos.append(TodoItem(text=text, done=done, created_at=created_at, checked_at=checked_at, status=status))
+        todos = self._todos_from_data(data)
 
         self.todos = todos
         self.refresh_list()
@@ -1197,32 +1204,7 @@ class TodoApp(QWidget):
             QMessageBox.warning(self, "恢复备份", "备份文件损坏，恢复失败")
             return
 
-        todos: list[TodoItem] = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            text = str(item.get("text", "")).strip()
-            if not text:
-                continue
-
-            done = bool(item.get("done", False))
-            created_at = item.get("created_at") or self._now_text()
-            checked_at = item.get("checked_at")
-            status = item.get("status") if item.get("status") in STATUS_FILTER_OPTIONS else None
-            if not status:
-                status = STATUS_DONE if done else STATUS_IN_PROGRESS
-            if status == STATUS_DONE:
-                done = True
-                if not checked_at:
-                    checked_at = self._now_text()
-            elif status == STATUS_DELETED:
-                done = False
-                checked_at = None
-            else:
-                done = False
-                checked_at = None
-
-            todos.append(TodoItem(text=text, done=done, created_at=created_at, checked_at=checked_at, status=status))
+        todos = self._todos_from_data(data)
 
         self.todos = todos
         self.refresh_list()

@@ -3,9 +3,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Local Python environments
+.venv/
+venv/
+
 # Build / packaging outputs
 build/
 dist/
 
-# PyInstaller intermediate file
-*.spec
+# The PyInstaller spec is source configuration and is committed.

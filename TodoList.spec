@@ -1,11 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+
+project_root = Path(SPECPATH)
+icon_path = project_root / 'assets' / 'icons' / 'todolist.ico'
 
 a = Analysis(
-    ['main.py'],
-    pathex=[],
+    [str(project_root / 'main.py')],
+    pathex=[str(project_root)],
     binaries=[],
-    datas=[('assets/icons/todolist.ico', 'assets/icons')],
+    datas=[(str(icon_path), 'assets/icons')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +39,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/icons/todolist.ico',
+    icon=str(icon_path),
 )
