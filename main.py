@@ -6,6 +6,7 @@ import ctypes
 import tempfile
 import shutil
 import subprocess
+import time
 from datetime import datetime
 from dataclasses import dataclass, asdict
 
@@ -58,6 +59,7 @@ DATA_FILE = "todos.json"
 APP_DIR_NAME = "TodoList"
 HIDDEN_DATA_FILE = ".todos.json"
 BACKUP_DIR_NAME = "backups"
+TASKBAR_SHORTCUT_COUNT = 7
 MAX_BACKUP_FILES = 20
 MAX_DAILY_BACKUPS = 30
 MAX_WEEKLY_BACKUPS = 26
@@ -208,23 +210,18 @@ class TodoApp(QWidget):
         self._force_quit = False
 
         taskbar_shortcuts = self._get_taskbar_shortcut_paths()
-        self.app_shortcuts: list[dict[str, str]] = [
-            {
-                "label": "Win+1",
-                "path": taskbar_shortcuts[0] if len(taskbar_shortcuts) > 0 else "",
-                "icon_path": self._get_taskbar_icon_source(taskbar_shortcuts[0])
-                if len(taskbar_shortcuts) > 0
-                else "",
-            },
-            {
-                "label": "Win+2",
-                "path": taskbar_shortcuts[1] if len(taskbar_shortcuts) > 1 else "",
-                "icon_path": self._get_taskbar_icon_source(taskbar_shortcuts[1])
-                if len(taskbar_shortcuts) > 1
-                else "",
-            },
-        ]
+        self.app_shortcuts: list[dict[str, str]] = []
+        for index in range(TASKBAR_SHORTCUT_COUNT):
+            shortcut_path = taskbar_shortcuts[index] if index < len(taskbar_shortcuts) else ""
+            self.app_shortcuts.append(
+                {
+                    "label": f"Win+{index + 1}",
+                    "path": shortcut_path,
+                    "icon_path": self._get_taskbar_icon_source(shortcut_path),
+                }
+            )
         self.shortcut_buttons: list[QPushButton] = []
+        self.shortcut_open_states: list[bool] = [False] * TASKBAR_SHORTCUT_COUNT
         self._shortcut_icon_provider = QFileIconProvider()
         self._ball_size = 84
         self._ball_visible_size = 68
@@ -552,6 +549,8 @@ class TodoApp(QWidget):
         if not os.path.isdir(pinned_dir):
             return []
 
+        # These two are resolved first because the shell can enumerate pinned
+        # shortcuts alphabetically while Win+number follows taskbar order.
         preferred_names = ["Microsoft Edge.lnk", "File Explorer.lnk"]
         paths: list[str] = []
         for name in preferred_names:
@@ -590,7 +589,18 @@ class TodoApp(QWidget):
         if index < 0 or index >= len(self.app_shortcuts):
             return
         if os.name == "nt":
-            self._send_windows_number_key(index + 1)
+            number = index + 1
+            if self.shortcut_open_states[index]:
+                # The launcher stays available while the target app is open,
+                # so reproduce Windows' second taskbar click explicitly:
+                # activate the target, then minimize it.
+                self._send_windows_number_key(number)
+                time.sleep(0.08)
+                self._send_windows_number_key(number)
+                self.shortcut_open_states[index] = False
+            else:
+                self._send_windows_number_key(number)
+                self.shortcut_open_states[index] = True
             return
 
         path = self.app_shortcuts[index].get("path", "")
