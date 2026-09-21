@@ -363,6 +363,10 @@ class TodoApp(QWidget):
 
         self.ball_button = QPushButton("待办")
         self.ball_button.setObjectName("floatingBall")
+        # Keep the visible control exactly the same size as the circular mask.
+        # The outer 84 px window also contains the shortcut panel and reserves
+        # an 8 px inset around this 68 px button.
+        self.ball_button.setFixedSize(self._ball_visible_size, self._ball_visible_size)
         self.ball_button.setToolTip("点击恢复窗口")
         self.ball_button.installEventFilter(self)
         self.ball_button.hide()
@@ -466,11 +470,11 @@ class TodoApp(QWidget):
                 background: #d1d5db;
             }
             #floatingBall {
-                min-width: 71px;
-                max-width: 71px;
-                min-height: 71px;
-                max-height: 71px;
-                border-radius: 35px;
+                min-width: 68px;
+                max-width: 68px;
+                min-height: 68px;
+                max-height: 68px;
+                border-radius: 34px;
                 background: #2563eb;
                 color: white;
                 font-size: 14px;
