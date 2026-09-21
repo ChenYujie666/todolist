@@ -376,6 +376,7 @@ class TodoApp(QWidget):
         for index in range(len(self.app_shortcuts)):
             shortcut_button = QPushButton()
             shortcut_button.setObjectName(f"appShortcutButton{index + 1}")
+            shortcut_button.setProperty("shortcutButton", True)
             shortcut_button.setFixedSize(self._shortcut_button_width, self._shortcut_button_height)
             shortcut_button.setToolTip(self.app_shortcuts[index]["label"])
             shortcut_button.setText(str(index + 1))
@@ -482,18 +483,20 @@ class TodoApp(QWidget):
             #floatingShortcuts {
                 background: transparent;
             }
-            #appShortcutButton1, #appShortcutButton2 {
-                border: 1px solid #d1d5db;
-                border-radius: 10px;
+            QPushButton[shortcutButton="true"] {
+                border: none;
+                border-radius: 8px;
                 padding: 0;
-                background: rgba(255, 255, 255, 245);
-                color: #374151;
+                background: transparent;
+                color: transparent;
                 font-size: 13px;
                 font-weight: 700;
             }
-            #appShortcutButton1:hover, #appShortcutButton2:hover {
-                background: #eff6ff;
-                border-color: #2563eb;
+            QPushButton[shortcutButton="true"]:hover {
+                background: rgba(255, 255, 255, 45);
+            }
+            QPushButton[shortcutButton="true"]:pressed {
+                background: rgba(255, 255, 255, 75);
             }
             QListWidget {
                 border: 1px solid #e5e7eb;
